@@ -9,27 +9,19 @@ const statusNode = document.getElementById('status');
 let generatorPromise = null;
 let ready = false;
 
-// The inference page is a normal HTTPS document, so it may load the pinned
-// open-source runtime/model from their CDNs. Browser Cache API is used by
-// Transformers.js so subsequent starts can reuse downloaded model assets.
 env.allowLocalModels = false;
 env.allowRemoteModels = true;
 env.useBrowserCache = true;
 
 function post(type, payload = {}) {
   if (window.parent === window) return;
-  window.parent.postMessage({
-    ns: CHANNEL,
-    type,
-    ...payload,
-  }, '*');
+  window.parent.postMessage({ ns: CHANNEL, type, ...payload }, '*');
 }
 
 function progressUpdate(update) {
   const progress = Number(update?.progress);
   const file = String(update?.file || update?.name || 'model');
   const state = String(update?.status || 'loading');
-
   const value = Number.isFinite(progress)
     ? Math.max(0, Math.min(100, progress))
     : null;
@@ -38,11 +30,7 @@ function progressUpdate(update) {
     ? `${state} ${file}`
     : `${state} ${file} ${Math.round(value)}%`;
 
-  post('progress', {
-    progress: value,
-    file,
-    status: state,
-  });
+  post('progress', { progress: value, file, status: state });
 }
 
 async function createGenerator() {
@@ -52,25 +40,16 @@ async function createGenerator() {
 
   statusNode.textContent = 'loading qwen model';
 
-  const generator = await pipeline(
-    'text-generation',
-    MODEL,
-    {
-      revision: REVISION,
-      dtype: DTYPE,
-      device: 'webgpu',
-      progress_callback: progressUpdate,
-    },
-  );
+  const generator = await pipeline('text-generation', MODEL, {
+    revision: REVISION,
+    dtype: DTYPE,
+    device: 'webgpu',
+    progress_callback: progressUpdate,
+  });
 
   ready = true;
   statusNode.textContent = 'qwen ready';
-  post('ready', {
-    model: MODEL,
-    revision: REVISION,
-    dtype: DTYPE,
-  });
-
+  post('ready', { model: MODEL, revision: REVISION, dtype: DTYPE });
   return generator;
 }
 
@@ -82,7 +61,6 @@ async function getGenerator() {
       throw error;
     });
   }
-
   return generatorPromise;
 }
 
@@ -110,24 +88,26 @@ async function generate(messages) {
   const generator = await getGenerator();
 
   const safeMessages = Array.isArray(messages)
-    ? messages.slice(0, 4).map((message) => ({
+    ? messages.slice(-2).map((message) => ({
         role: ['system', 'user', 'assistant'].includes(message?.role)
           ? message.role
           : 'user',
-        content: String(message?.content || '').slice(0, 18000),
+        content: String(message?.content || '').slice(0, 9000),
       }))
     : [];
 
+  // Agent replies are normally 10-50 tokens. Keeping this ceiling low makes
+  // each WebGPU decision substantially faster and also reduces ram/vram churn.
   const output = await generator(safeMessages, {
-    max_new_tokens: 220,
+    max_new_tokens: 96,
     do_sample: false,
-    repetition_penalty: 1.04,
+    num_beams: 1,
+    repetition_penalty: 1.01,
     return_full_text: false,
   });
 
   const text = normalizeText(output);
   if (!text) throw new Error('local Qwen returned an empty response');
-
   return text;
 }
 
@@ -159,11 +139,7 @@ window.addEventListener('message', async (event) => {
       post('response', {
         id: message.id,
         ok: true,
-        value: {
-          ready: true,
-          model: MODEL,
-          dtype: DTYPE,
-        },
+        value: { ready: true, model: MODEL, dtype: DTYPE },
       });
       return;
     }
