@@ -1,5 +1,6 @@
+import { generateText } from 'ai';
+
 const MODEL = process.env.AI_MODEL || 'alibaba/qwen3.8-flash';
-const GATEWAY_URL = 'https://ai-gateway.vercel.sh/v1/chat/completions';
 const MAX_BODY_CHARS = 120_000;
 const MAX_TASK_CHARS = 1_500;
 const MAX_RESULT_CHARS = 500;
@@ -22,22 +23,12 @@ function clientIp(req) {
 function allowRequest(req) {
   const ip = clientIp(req);
   const now = Date.now();
-  const windowMs = 60_000;
-  const limit = 90;
-  const current = recentRequests.get(ip) || [];
-  const fresh = current.filter((stamp) => now - stamp < windowMs);
+  const current = (recentRequests.get(ip) || []).filter((stamp) => now - stamp < 60_000);
 
-  if (fresh.length >= limit) return false;
+  if (current.length >= 90) return false;
 
-  fresh.push(now);
-  recentRequests.set(ip, fresh);
-
-  if (recentRequests.size > 500) {
-    for (const [key, stamps] of recentRequests.entries()) {
-      if (!stamps.some((stamp) => now - stamp < windowMs)) recentRequests.delete(key);
-    }
-  }
-
+  current.push(now);
+  recentRequests.set(ip, current);
   return true;
 }
 
@@ -67,8 +58,7 @@ function compactPage(page) {
     sv: clip(page.sv || page.snapshotVersion, 120),
   };
 
-  const serialized = JSON.stringify(compact);
-  if (serialized.length <= MAX_PAGE_CHARS) return compact;
+  if (JSON.stringify(compact).length <= MAX_PAGE_CHARS) return compact;
 
   compact.x = compact.x.slice(0, 4_000);
   compact.e = compact.e.slice(0, 60);
@@ -87,10 +77,6 @@ function parseAction(text) {
     value = JSON.parse(match[0]);
   }
 
-  if (!value || typeof value.action !== 'string') {
-    throw new Error('model_returned_no_action');
-  }
-
   const allowed = new Set([
     'click',
     'type',
@@ -102,8 +88,8 @@ function parseAction(text) {
     'finish',
   ]);
 
-  if (!allowed.has(value.action)) {
-    throw new Error(`unsupported_action:${value.action}`);
+  if (!value || !allowed.has(value.action)) {
+    throw new Error('model_returned_invalid_action');
   }
 
   return value;
@@ -128,14 +114,14 @@ Element fields can include i=id, k=kind, l=label, h=href, n=name, p=placeholder,
 Rules:
 - Use only element ids that exist in the CURRENT e list.
 - Copy the current sv into click/type/select/submit actions.
-- Normal text/search fields are allowed. You may type search queries and submit forms/search boxes.
+- Normal text and search fields are allowed. You may type search queries and submit normal forms/search boxes.
 - Password fields are always off-limits.
-- Payment/financial credential fields and payment/purchase/transfer buttons are off-limits.
+- Payment/financial credential fields and payment/purchase/transfer controls are always off-limits.
 - File inputs are off-limits.
-- Do not use javascript:, data:, file:, chrome:, or other non-http(s) navigation.
-- Use one action at a time; the extension will inspect the changed page again afterward.
-- If the prior result says the element became stale, choose again from the new snapshot instead of repeating an old id.
-- Do not claim success unless the current page state supports it.
+- Only navigate to http/https URLs.
+- Use one action at a time. The extension will inspect the page again after each action.
+- If the previous result says an element became stale, choose again from the new snapshot rather than repeating its old id.
+- Do not claim success unless current page state supports it.
 - Step ${step}/${maxSteps}.`;
 }
 
@@ -151,15 +137,6 @@ export default async function handler(req, res) {
     return res.status(429).json({ ok: false, error: 'rate_limited' });
   }
 
-  const auth = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
-  if (!auth) {
-    return res.status(503).json({
-      ok: false,
-      error: 'gateway_auth_missing',
-      hint: 'Deploy on Vercel with OIDC or set AI_GATEWAY_API_KEY.',
-    });
-  }
-
   try {
     const raw = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {});
     if (raw.length > MAX_BODY_CHARS) {
@@ -173,69 +150,33 @@ export default async function handler(req, res) {
     const maxSteps = Math.max(step, Math.min(30, Number(body.maxSteps) || 12));
     const page = compactPage(body.page);
 
-    if (!task) return res.status(400).json({ ok: false, error: 'task_required' });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 55_000);
-
-    let gatewayResponse;
-    try {
-      gatewayResponse = await fetch(GATEWAY_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${auth}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: MODEL,
-          messages: [
-            { role: 'system', content: systemPrompt(step, maxSteps) },
-            {
-              role: 'user',
-              content: JSON.stringify({ task, lastResult, page }),
-            },
-          ],
-          temperature: 0,
-          max_tokens: 220,
-        }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
+    if (!task) {
+      return res.status(400).json({ ok: false, error: 'task_required' });
     }
 
-    const gatewayText = await gatewayResponse.text();
-    let gatewayJson = {};
-    try {
-      gatewayJson = JSON.parse(gatewayText);
-    } catch {
-      gatewayJson = { raw: gatewayText.slice(0, 1_000) };
-    }
+    const { text, usage, response } = await generateText({
+      model: MODEL,
+      system: systemPrompt(step, maxSteps),
+      prompt: JSON.stringify({ task, lastResult, page }),
+      temperature: 0,
+      maxOutputTokens: 220,
+      abortSignal: AbortSignal.timeout(55_000),
+    });
 
-    if (!gatewayResponse.ok) {
-      console.error('AI Gateway error', gatewayResponse.status, gatewayJson);
-      return res.status(502).json({
-        ok: false,
-        error: 'model_backend_failed',
-        status: gatewayResponse.status,
-      });
-    }
-
-    const content = gatewayJson?.choices?.[0]?.message?.content || '';
-    const action = parseAction(content);
+    const action = parseAction(text);
 
     return res.status(200).json({
       ok: true,
       action,
-      model: gatewayJson.model || MODEL,
-      usage: gatewayJson.usage || null,
+      model: response?.modelId || MODEL,
+      usage: usage || null,
     });
   } catch (error) {
-    const aborted = error?.name === 'AbortError';
     console.error('agent endpoint error', error);
-    return res.status(aborted ? 504 : 500).json({
+    const timeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+    return res.status(timeout ? 504 : 500).json({
       ok: false,
-      error: aborted ? 'model_timeout' : String(error?.message || 'agent_failed'),
+      error: timeout ? 'model_timeout' : String(error?.message || 'agent_failed'),
     });
   }
 }
