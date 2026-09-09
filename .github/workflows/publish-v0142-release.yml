@@ -32,21 +32,45 @@ jobs:
       - name: verify full zip again
         run: |
           unzip -t releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip
-          echo '6bbcf9f76f9fa15dfc4cc5b8cfe9e1bb83cad3002ef3bd4b98aabe50b17fde5f  releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip' | sha256sum -c -
+          ZIP_SHA=$(sha256sum releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip | cut -d' ' -f1)
+          echo "ZIP_SHA=$ZIP_SHA" >> "$GITHUB_ENV"
+          python - <<'PY'
+          import hashlib, json, zipfile
+          p='releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip'
+          expected='9e33a5911974174761d0dfdcc0bec975d9c45af0eae5e9eb647b8ba9442a8f91'
+          with zipfile.ZipFile(p) as z:
+              model=[n for n in z.namelist() if n.endswith('/models/Qwen3-0.6B-ONNX/onnx/model_q4f16.onnx')][0]
+              h=hashlib.sha256()
+              with z.open(model) as f:
+                  while True:
+                      b=f.read(8*1024*1024)
+                      if not b: break
+                      h.update(b)
+              if h.hexdigest() != expected:
+                  raise SystemExit('model checksum mismatch')
+              manifest=[n for n in z.namelist() if n.endswith('/models/bundle-manifest.json')][0]
+              data=json.loads(z.read(manifest))
+              if data.get('fully_bundled') is not True:
+                  raise SystemExit('bundle is not marked fully bundled')
+              if not any(n.endswith('/vendor/transformers.min.js') for n in z.namelist()):
+                  raise SystemExit('transformers runtime missing')
+          PY
 
       - name: publish direct release asset
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: web-spoofer-v0.14.2-qwen3-local-full
         run: |
+          NOTES="Self-contained v0.14.2 build with bundled Qwen3 model and Transformers.js runtime. ZIP SHA-256: $ZIP_SHA"
           if gh release view "$TAG" --repo daytondeltap/AIBACKENDS >/dev/null 2>&1; then
             gh release upload "$TAG" releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip \
               --repo daytondeltap/AIBACKENDS \
               --clobber
+            gh release edit "$TAG" --repo daytondeltap/AIBACKENDS --notes "$NOTES"
           else
             gh release create "$TAG" releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip \
               --repo daytondeltap/AIBACKENDS \
               --target build-v0142-qwen3 \
               --title 'Web Spoofer v0.14.2 — Qwen3 Local Full' \
-              --notes 'Self-contained v0.14.2 build with bundled Qwen3 model and Transformers.js runtime. SHA-256: 6bbcf9f76f9fa15dfc4cc5b8cfe9e1bb83cad3002ef3bd4b98aabe50b17fde5f'
+              --notes "$NOTES"
           fi
