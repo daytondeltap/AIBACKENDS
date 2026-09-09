@@ -40,12 +40,16 @@ async function createGenerator() {
 
   statusNode.textContent = 'loading qwen model';
 
-  const generator = await pipeline('text-generation', MODEL, {
-    revision: REVISION,
-    dtype: DTYPE,
-    device: 'webgpu',
-    progress_callback: progressUpdate,
-  });
+  const generator = await pipeline(
+    'text-generation',
+    MODEL,
+    {
+      revision: REVISION,
+      dtype: DTYPE,
+      device: 'webgpu',
+      progress_callback: progressUpdate,
+    },
+  );
 
   ready = true;
   statusNode.textContent = 'qwen ready';
@@ -66,7 +70,6 @@ async function getGenerator() {
 
 function normalizeText(output) {
   const value = output?.[0]?.generated_text;
-
   if (typeof value === 'string') return value.trim();
 
   if (Array.isArray(value)) {
@@ -76,12 +79,24 @@ function normalizeText(output) {
         return item.content.trim();
       }
     }
-
     const last = value[value.length - 1];
     if (typeof last?.content === 'string') return last.content.trim();
   }
 
   return '';
+}
+
+function looksDegenerate(text) {
+  const compact = String(text || '').replace(/\s+/g, '');
+  if (!compact) return true;
+  if (/(.)\1{18,}/.test(compact)) return true;
+
+  if (compact.length >= 24) {
+    const diversity = new Set(compact).size;
+    if (diversity <= 4) return true;
+  }
+
+  return false;
 }
 
 async function generate(messages) {
@@ -96,18 +111,22 @@ async function generate(messages) {
       }))
     : [];
 
-  // Agent replies are normally 10-50 tokens. Keeping this ceiling low makes
-  // each WebGPU decision substantially faster and also reduces ram/vram churn.
   const output = await generator(safeMessages, {
-    max_new_tokens: 96,
+    max_new_tokens: 48,
     do_sample: false,
     num_beams: 1,
-    repetition_penalty: 1.01,
+    repetition_penalty: 1.15,
+    no_repeat_ngram_size: 3,
     return_full_text: false,
   });
 
   const text = normalizeText(output);
   if (!text) throw new Error('local Qwen returned an empty response');
+
+  if (looksDegenerate(text)) {
+    throw new Error('local Qwen produced a degenerate repeated response');
+  }
+
   return text;
 }
 
