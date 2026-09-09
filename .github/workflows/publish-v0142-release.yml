@@ -1,0 +1,52 @@
+name: publish web spoofer v0.14.2 full zip
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - build-v0142-qwen3
+    paths:
+      - '.github/workflows/publish-v0142-release.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download verified full build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p releaseinput
+          gh run download 34361877925 \
+            --repo daytondeltap/AIBACKENDS \
+            --name web-spoofer-v0.14.2-qwen3-local-full \
+            --dir releaseinput
+          test -f releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip
+
+      - name: verify full zip again
+        run: |
+          unzip -t releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip
+          echo '6bbcf9f76f9fa15dfc4cc5b8cfe9e1bb83cad3002ef3bd4b98aabe50b17fde5f  releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip' | sha256sum -c -
+
+      - name: publish direct release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: web-spoofer-v0.14.2-qwen3-local-full
+        run: |
+          if gh release view "$TAG" --repo daytondeltap/AIBACKENDS >/dev/null 2>&1; then
+            gh release upload "$TAG" releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip \
+              --repo daytondeltap/AIBACKENDS \
+              --clobber
+          else
+            gh release create "$TAG" releaseinput/web-spoofer-v0.14.2-qwen3-local-full.zip \
+              --repo daytondeltap/AIBACKENDS \
+              --target build-v0142-qwen3 \
+              --title 'Web Spoofer v0.14.2 — Qwen3 Local Full' \
+              --notes 'Self-contained v0.14.2 build with bundled Qwen3 model and Transformers.js runtime. SHA-256: 6bbcf9f76f9fa15dfc4cc5b8cfe9e1bb83cad3002ef3bd4b98aabe50b17fde5f'
+          fi
