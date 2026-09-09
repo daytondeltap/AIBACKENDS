@@ -40,7 +40,7 @@ jobs:
         run: |
           test -f build/web-spoofer-v0.14.2-qwen3-local-full.zip
           unzip -t build/web-spoofer-v0.14.2-qwen3-local-full.zip
-          sha256sum build/web-spoofer-v0.14.2-qwen3-local-full.zip
+          sha256sum build/web-spoofer-v0.14.2-qwen3-local-full.zip | tee build/FINAL_SHA256.txt
           unzip -l build/web-spoofer-v0.14.2-qwen3-local-full.zip | grep 'models/Qwen3-0.6B-ONNX/onnx/model_q4f16.onnx'
           unzip -l build/web-spoofer-v0.14.2-qwen3-local-full.zip | grep 'vendor/transformers.min.js'
           python - <<'PY'
@@ -65,9 +65,59 @@ jobs:
                   raise SystemExit('bundle manifest not marked fully_bundled')
           PY
 
+      - name: split verified zip for transport
+        run: |
+          mkdir -p build/split
+          split -b 175M -d -a 2 \
+            build/web-spoofer-v0.14.2-qwen3-local-full.zip \
+            build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part
+          test -f build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part00
+          test -f build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part01
+          test -f build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part02
+          test ! -f build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part03
+          sha256sum build/split/* | tee build/split/PART_SHA256.txt
+          cat > build/split/rebuild.bat <<'BAT'
+          @echo off
+          setlocal
+          echo rebuilding web-spoofer-v0.14.2-qwen3-local-full.zip...
+          copy /b web-spoofer-v0.14.2-qwen3-local-full.zip.part00+web-spoofer-v0.14.2-qwen3-local-full.zip.part01+web-spoofer-v0.14.2-qwen3-local-full.zip.part02 web-spoofer-v0.14.2-qwen3-local-full.zip >nul
+          if errorlevel 1 (
+            echo rebuild failed
+            exit /b 1
+          )
+          echo done
+          echo verify with: certutil -hashfile web-spoofer-v0.14.2-qwen3-local-full.zip SHA256
+          endlocal
+          BAT
+          cat build/FINAL_SHA256.txt > build/split/FINAL_SHA256.txt
+
       - uses: actions/upload-artifact@v4
         with:
-          name: web-spoofer-v0.14.2-qwen3-local-full
-          path: build/web-spoofer-v0.14.2-qwen3-local-full.zip
+          name: web-spoofer-v0.14.2-part00
+          path: build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part00
+          compression-level: 0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-spoofer-v0.14.2-part01
+          path: build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part01
+          compression-level: 0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-spoofer-v0.14.2-part02
+          path: build/split/web-spoofer-v0.14.2-qwen3-local-full.zip.part02
+          compression-level: 0
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-spoofer-v0.14.2-rebuild
+          path: |
+            build/split/rebuild.bat
+            build/split/PART_SHA256.txt
+            build/split/FINAL_SHA256.txt
           compression-level: 0
           retention-days: 7
